@@ -1,6 +1,7 @@
 # Arduino CLI / IDE
 build/
 .cache/
+.pio/
 node_modules/
 *.elf
 *.bin
