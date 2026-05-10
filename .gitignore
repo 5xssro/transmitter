@@ -1,0 +1,19 @@
+# Arduino CLI / IDE
+build/
+.cache/
+node_modules/
+*.elf
+*.bin
+*.hex
+*.map
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Secrets (add filenames if you store WiFi/certs locally)
+# secrets.h
