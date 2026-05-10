@@ -2,12 +2,15 @@
 #define TX_LVGL_UI_H
 
 /*
- * LVGL UI (240×320). Výber modelu: lv_roller so štandardnou fade maskou (LVGL 8),
- * menší font (LV_PART_MAIN) vs. väčší vybraný riadok (LV_PART_SELECTED).
- * Diakritika: tx_font_ui_14 / tx_font_ui_18 (Arial subset + WiFi / varovanie z FA).
+ * LVGL 8.3 — 240×320 (LOLIN S3 Pro).
+ * Horný riadok: batéria | IP (STA alebo AP) | sila ESP-NOW (telemetria od prijímača).
+ * Pod ním: názov modelu (diakritika), orámovanie, jemný tieň, pri dlhom texte scroll.
+ * Režim PICK: ten istý riadok + výber modelu (roller).
  */
 #include "lv_conf.h"
+#ifndef LV_CONF_INCLUDE_SIMPLE
 #define LV_CONF_INCLUDE_SIMPLE
+#endif
 #include <lvgl.h>
 
 #if (LVGL_VERSION_MAJOR != 8)
@@ -30,6 +33,7 @@
 #include "transmitter_prefs.h"
 #include "sd_fs.h"
 #include "tx_radio_task.h"
+#include "espnow_tx.h"
 #include <SD.h>
 
 LV_FONT_DECLARE(tx_font_ui_14);
@@ -57,6 +61,10 @@ LV_FONT_DECLARE(tx_font_ui_18);
 #endif
 #ifndef TX_LV_DISP_BUF_LINES
 #define TX_LV_DISP_BUF_LINES 48
+#endif
+
+#ifndef TX_LV_TELEM_STALE_MS
+#define TX_LV_TELEM_STALE_MS 2800
 #endif
 
 static volatile int32_t tx_lv_enc_accum = 0;
@@ -99,14 +107,16 @@ static uint32_t tx_lv_btn_press_start = 0;
 static uint8_t tx_lv_btn_prev_low = 0;
 
 static lv_obj_t* tx_lv_bar = nullptr;
+static lv_obj_t* tx_lv_mod_batt = nullptr;
+static lv_obj_t* tx_lv_mod_ip = nullptr;
+static lv_obj_t* tx_lv_mod_sig = nullptr;
 static lv_obj_t* tx_lv_lbl_batt = nullptr;
 static lv_obj_t* tx_lv_lbl_ip = nullptr;
-static lv_obj_t* tx_lv_lbl_wifi = nullptr;
+static lv_obj_t* tx_lv_lbl_sig = nullptr;
 
 static lv_obj_t* tx_lv_cont_active = nullptr;
 static lv_obj_t* tx_lv_card_model = nullptr;
 static lv_obj_t* tx_lv_lbl_model = nullptr;
-static lv_obj_t* tx_lv_lbl_sticks = nullptr;
 
 static lv_obj_t* tx_lv_cont_pick = nullptr;
 static lv_obj_t* tx_lv_lbl_pick_title = nullptr;
@@ -127,21 +137,51 @@ static bool tx_lv_model_dir_valid(const String& d) {
   return www_model_is_listed(d);
 }
 
-static int tx_lv_wifi_level(void) {
-  if (WiFi.status() != WL_CONNECTED) return 0;
-  int r = WiFi.RSSI();
-  if (r >= -50) return 5;
-  if (r >= -60) return 4;
-  if (r >= -70) return 3;
-  if (r >= -78) return 2;
-  return 1;
-}
-
 /** UTF-8 názov modelu z SD (diakritika ak je v cfg). */
 static String tx_lv_title_for_index(int idx) {
   if (www_model_count <= 0) return String("-");
   if (idx < 1 || idx > www_model_count) return String("-");
   return model_web_cfg_list_label(www_model_names[idx]);
+}
+
+static void tx_lv_format_espnow_sig(char* buf, size_t buflen) {
+  if (!buf || buflen < 4) return;
+  buf[0] = '\0';
+  uint8_t mac[6];
+  if (!tx_radio_cached_rx_mac(mac)) {
+    snprintf(buf, buflen, "%s", "--");
+    return;
+  }
+  uint16_t rmv = 0;
+  uint8_t sig = 0;
+  uint32_t age = 0;
+  bool have = false;
+  txesp_telem_snapshot_for_mac(mac, &rmv, &sig, &age, &have);
+  if (!have || age > TX_LV_TELEM_STALE_MS) {
+    snprintf(buf, buflen, "%s", "--");
+    return;
+  }
+  if (sig > 4) sig = 4;
+  /* 5 úrovní, vyplnené # podľa sig (0 = slabé … 4 = silné). */
+  char b[8];
+  int p = 0;
+  for (int i = 0; i < 5; i++) b[p++] = (i <= (int)sig) ? '#' : '-';
+  b[p] = '\0';
+  snprintf(buf, buflen, "%s", b);
+}
+
+static void tx_lv_style_status_module(lv_obj_t* box) {
+  lv_obj_set_style_radius(box, 8, 0);
+  lv_obj_set_style_bg_color(box, lv_color_hex(0x181820), 0);
+  lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(box, 1, 0);
+  lv_obj_set_style_border_color(box, lv_color_hex(0x3C3C4C), 0);
+  lv_obj_set_style_border_opa(box, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_left(box, 5, 0);
+  lv_obj_set_style_pad_right(box, 5, 0);
+  lv_obj_set_style_pad_top(box, 3, 0);
+  lv_obj_set_style_pad_bottom(box, 3, 0);
+  lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
 }
 
 #if LV_DRAW_COMPLEX
@@ -205,7 +245,7 @@ static void tx_lvgl_flush_cb(lv_disp_drv_t* disp_drv, const lv_area_t* area, lv_
 }
 
 static void tx_lvgl_status_update(void) {
-  if (!tx_lv_lbl_batt || !tx_lv_lbl_ip || !tx_lv_lbl_wifi) return;
+  if (!tx_lv_lbl_batt || !tx_lv_lbl_ip || !tx_lv_lbl_sig) return;
 
   uint16_t bv = tx_batt_pack_mv();
   char vb[14];
@@ -215,15 +255,13 @@ static void tx_lvgl_status_update(void) {
   String ip = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
   lv_label_set_text(tx_lv_lbl_ip, ip.c_str());
 
-  if (WiFi.status() == WL_CONNECTED) {
-    int lv = tx_lv_wifi_level();
-    char wbuf[16];
-    snprintf(wbuf, sizeof(wbuf), "%s %d", LV_SYMBOL_WIFI, lv);
-    lv_label_set_text(tx_lv_lbl_wifi, wbuf);
-    lv_obj_set_style_text_color(tx_lv_lbl_wifi, lv_color_hex(0x55CC55), 0);
+  char sigb[12];
+  tx_lv_format_espnow_sig(sigb, sizeof(sigb));
+  lv_label_set_text(tx_lv_lbl_sig, sigb);
+  if (sigb[0] == '-' && sigb[1] == '-' && sigb[2] == '\0') {
+    lv_obj_set_style_text_color(tx_lv_lbl_sig, lv_color_hex(0x666678), 0);
   } else {
-    lv_label_set_text(tx_lv_lbl_wifi, LV_SYMBOL_WARNING " AP");
-    lv_obj_set_style_text_color(tx_lv_lbl_wifi, lv_color_hex(0xCC9040), 0);
+    lv_obj_set_style_text_color(tx_lv_lbl_sig, lv_color_hex(0x55CC88), 0);
   }
 
   if (tx_lv_bar) lv_obj_invalidate(tx_lv_bar);
@@ -284,6 +322,7 @@ static void tx_lvgl_refresh_active_title(void) {
     }
   }
   lv_label_set_text(tx_lv_lbl_model, title.c_str());
+  lv_label_set_long_mode(tx_lv_lbl_model, LV_LABEL_LONG_SCROLL_CIRCULAR);
   if (tx_lv_card_model) {
     lv_obj_update_layout(tx_lv_card_model);
     lv_obj_invalidate(tx_lv_lbl_model);
@@ -317,40 +356,61 @@ static void tx_lvgl_build_ui(void) {
   lv_disp_t* d = const_cast<lv_disp_t*>(lv_disp_get_default());
   const lv_coord_t w = lv_disp_get_hor_res(d);
   const lv_coord_t h = lv_disp_get_ver_res(d);
-  const lv_coord_t bar_h = 28;
+  const lv_coord_t bar_h = 34;
+  const lv_coord_t side_mod_w = 56;
 
   tx_lv_bar = lv_obj_create(scr);
   lv_obj_remove_style_all(tx_lv_bar);
   lv_obj_set_size(tx_lv_bar, w, bar_h);
   lv_obj_align(tx_lv_bar, LV_ALIGN_TOP_MID, 0, 0);
-  lv_obj_set_style_bg_color(tx_lv_bar, lv_color_hex(0x000000), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(tx_lv_bar, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(tx_lv_bar, LV_OPA_TRANSP, 0);
+  lv_obj_set_layout(tx_lv_bar, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(tx_lv_bar, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(tx_lv_bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_set_style_pad_left(tx_lv_bar, 4, 0);
   lv_obj_set_style_pad_right(tx_lv_bar, 4, 0);
   lv_obj_set_style_pad_top(tx_lv_bar, 4, 0);
-  lv_obj_set_style_pad_bottom(tx_lv_bar, 2, 0);
+  lv_obj_set_style_pad_bottom(tx_lv_bar, 4, 0);
+  lv_obj_set_style_pad_column(tx_lv_bar, 5, 0);
   lv_obj_clear_flag(tx_lv_bar, LV_OBJ_FLAG_SCROLLABLE);
 
-  tx_lv_lbl_batt = lv_label_create(tx_lv_bar);
+  tx_lv_mod_batt = lv_obj_create(tx_lv_bar);
+  lv_obj_set_size(tx_lv_mod_batt, side_mod_w, (lv_coord_t)(bar_h - 8));
+  tx_lv_style_status_module(tx_lv_mod_batt);
+
+  tx_lv_lbl_batt = lv_label_create(tx_lv_mod_batt);
   lv_label_set_long_mode(tx_lv_lbl_batt, LV_LABEL_LONG_CLIP);
   lv_obj_set_style_text_font(tx_lv_lbl_batt, &tx_font_ui_14, 0);
   lv_obj_set_style_text_color(tx_lv_lbl_batt, lv_color_hex(0xC6E050), 0);
   lv_label_set_text(tx_lv_lbl_batt, "-.-V");
-  lv_obj_align(tx_lv_lbl_batt, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_center(tx_lv_lbl_batt);
 
-  tx_lv_lbl_wifi = lv_label_create(tx_lv_bar);
-  lv_label_set_long_mode(tx_lv_lbl_wifi, LV_LABEL_LONG_CLIP);
-  lv_obj_set_style_text_font(tx_lv_lbl_wifi, &tx_font_ui_14, 0);
-  lv_label_set_text(tx_lv_lbl_wifi, LV_SYMBOL_WIFI);
-  lv_obj_align(tx_lv_lbl_wifi, LV_ALIGN_RIGHT_MID, 0, 0);
+  tx_lv_mod_ip = lv_obj_create(tx_lv_bar);
+  lv_obj_set_height(tx_lv_mod_ip, (lv_coord_t)(bar_h - 8));
+  lv_obj_set_flex_grow(tx_lv_mod_ip, 1);
+  lv_obj_set_style_min_width(tx_lv_mod_ip, 80, 0);
+  tx_lv_style_status_module(tx_lv_mod_ip);
 
-  tx_lv_lbl_ip = lv_label_create(tx_lv_bar);
+  tx_lv_lbl_ip = lv_label_create(tx_lv_mod_ip);
   lv_label_set_long_mode(tx_lv_lbl_ip, LV_LABEL_LONG_CLIP);
   lv_obj_set_style_text_font(tx_lv_lbl_ip, &tx_font_ui_14, 0);
   lv_obj_set_style_text_color(tx_lv_lbl_ip, lv_color_hex(0xE0D040), 0);
+  lv_obj_set_style_text_align(tx_lv_lbl_ip, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_text(tx_lv_lbl_ip, "0.0.0.0");
-  lv_obj_align(tx_lv_lbl_ip, LV_ALIGN_CENTER, 0, 0);
-  lv_obj_set_width(tx_lv_lbl_ip, (lv_coord_t)(w - 100));
+  lv_obj_set_width(tx_lv_lbl_ip, LV_PCT(100));
+  lv_obj_center(tx_lv_lbl_ip);
+
+  tx_lv_mod_sig = lv_obj_create(tx_lv_bar);
+  lv_obj_set_size(tx_lv_mod_sig, side_mod_w, (lv_coord_t)(bar_h - 8));
+  tx_lv_style_status_module(tx_lv_mod_sig);
+
+  tx_lv_lbl_sig = lv_label_create(tx_lv_mod_sig);
+  lv_label_set_long_mode(tx_lv_lbl_sig, LV_LABEL_LONG_CLIP);
+  lv_obj_set_style_text_font(tx_lv_lbl_sig, &tx_font_ui_14, 0);
+  lv_obj_set_style_text_color(tx_lv_lbl_sig, lv_color_hex(0x55CC88), 0);
+  lv_obj_set_style_text_align(tx_lv_lbl_sig, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_text(tx_lv_lbl_sig, "--");
+  lv_obj_center(tx_lv_lbl_sig);
 
   tx_lv_cont_active = lv_obj_create(scr);
   lv_obj_remove_style_all(tx_lv_cont_active);
@@ -359,44 +419,45 @@ static void tx_lvgl_build_ui(void) {
   lv_obj_set_style_bg_opa(tx_lv_cont_active, LV_OPA_TRANSP, 0);
   lv_obj_clear_flag(tx_lv_cont_active, LV_OBJ_FLAG_SCROLLABLE);
 
-  tx_lv_card_model = lv_obj_create(tx_lv_cont_active);
-  lv_obj_set_width(tx_lv_card_model, (lv_coord_t)(w - 16));
-  lv_obj_set_height(tx_lv_card_model, LV_SIZE_CONTENT);
-  lv_obj_set_style_bg_color(tx_lv_card_model, lv_color_hex(0x1A1A22), 0);
-  lv_obj_set_style_bg_opa(tx_lv_card_model, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_color(tx_lv_card_model, lv_color_hex(0x5E5E6A), 0);
-  lv_obj_set_style_border_width(tx_lv_card_model, 1, 0);
-  lv_obj_set_style_radius(tx_lv_card_model, 8, 0);
-  lv_obj_set_style_pad_top(tx_lv_card_model, 10, 0);
-  lv_obj_set_style_pad_bottom(tx_lv_card_model, 10, 0);
-  lv_obj_set_style_pad_left(tx_lv_card_model, 8, 0);
-  lv_obj_set_style_pad_right(tx_lv_card_model, 8, 0);
-  lv_obj_clear_flag(tx_lv_card_model, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_align(tx_lv_card_model, LV_ALIGN_TOP_MID, 0, 6);
-
-  tx_lv_lbl_model = lv_label_create(tx_lv_card_model);
-  lv_label_set_long_mode(tx_lv_lbl_model, LV_LABEL_LONG_DOT);
-  lv_obj_set_style_bg_opa(tx_lv_lbl_model, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_text_color(tx_lv_lbl_model, lv_color_hex(0xF0F0F4), 0);
-  lv_obj_set_style_text_font(tx_lv_lbl_model, &tx_font_ui_18, 0);
-  lv_obj_set_style_text_align(tx_lv_lbl_model, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_width(tx_lv_lbl_model, (lv_coord_t)(w - 40));
   {
-    lv_coord_t lh = lv_font_get_line_height(&tx_font_ui_18);
-    lv_obj_set_height(tx_lv_lbl_model, (lv_coord_t)(lh + 4));
-  }
-  lv_label_set_text(tx_lv_lbl_model, "-");
-  lv_obj_align(tx_lv_lbl_model, LV_ALIGN_CENTER, 0, 0);
+    const lv_coord_t pad_card_v = 6;
+    const lv_coord_t pad_card_h = 10;
+    const lv_coord_t lh = lv_font_get_line_height(&tx_font_ui_18);
+    const lv_coord_t card_h = (lv_coord_t)(lh + 2 * pad_card_v + 4);
 
-  tx_lv_lbl_sticks = lv_label_create(tx_lv_cont_active);
-  lv_label_set_long_mode(tx_lv_lbl_sticks, LV_LABEL_LONG_CLIP);
-  lv_obj_set_style_text_font(tx_lv_lbl_sticks, &tx_font_ui_14, 0);
-  lv_obj_set_style_text_color(tx_lv_lbl_sticks, lv_color_hex(0x55CC55), 0);
-  lv_obj_set_style_bg_opa(tx_lv_lbl_sticks, LV_OPA_COVER, 0);
-  lv_obj_set_style_bg_color(tx_lv_lbl_sticks, lv_color_hex(0x000000), 0);
-  lv_label_set_text(tx_lv_lbl_sticks, "ST ----  TH ----");
-  lv_obj_set_width(tx_lv_lbl_sticks, (lv_coord_t)(w - 12));
-  lv_obj_align(tx_lv_lbl_sticks, LV_ALIGN_BOTTOM_MID, 0, -6);
+    tx_lv_card_model = lv_obj_create(tx_lv_cont_active);
+    lv_obj_set_width(tx_lv_card_model, (lv_coord_t)(w - 12));
+    lv_obj_set_height(tx_lv_card_model, card_h);
+    lv_obj_set_style_bg_color(tx_lv_card_model, lv_color_hex(0x14141C), 0);
+    lv_obj_set_style_bg_opa(tx_lv_card_model, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(tx_lv_card_model, lv_color_hex(0x5A5A6E), 0);
+    lv_obj_set_style_border_width(tx_lv_card_model, 1, 0);
+    lv_obj_set_style_border_opa(tx_lv_card_model, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(tx_lv_card_model, 10, 0);
+    lv_obj_set_style_pad_top(tx_lv_card_model, pad_card_v, 0);
+    lv_obj_set_style_pad_bottom(tx_lv_card_model, pad_card_v, 0);
+    lv_obj_set_style_pad_left(tx_lv_card_model, pad_card_h, 0);
+    lv_obj_set_style_pad_right(tx_lv_card_model, pad_card_h, 0);
+    lv_obj_set_style_shadow_width(tx_lv_card_model, 14, 0);
+    lv_obj_set_style_shadow_ofs_x(tx_lv_card_model, 0, 0);
+    lv_obj_set_style_shadow_ofs_y(tx_lv_card_model, 4, 0);
+    lv_obj_set_style_shadow_spread(tx_lv_card_model, 0, 0);
+    lv_obj_set_style_shadow_opa(tx_lv_card_model, LV_OPA_40, 0);
+    lv_obj_set_style_shadow_color(tx_lv_card_model, lv_color_hex(0x000000), 0);
+    lv_obj_clear_flag(tx_lv_card_model, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(tx_lv_card_model, LV_ALIGN_TOP_MID, 0, 8);
+
+    tx_lv_lbl_model = lv_label_create(tx_lv_card_model);
+    lv_label_set_long_mode(tx_lv_lbl_model, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_bg_opa(tx_lv_lbl_model, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_color(tx_lv_lbl_model, lv_color_hex(0xF2F2F8), 0);
+    lv_obj_set_style_text_font(tx_lv_lbl_model, &tx_font_ui_18, 0);
+    lv_obj_set_style_text_align(tx_lv_lbl_model, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(tx_lv_lbl_model, (lv_coord_t)(w - 12 - pad_card_h * 2));
+    lv_obj_set_height(tx_lv_lbl_model, lh);
+    lv_label_set_text(tx_lv_lbl_model, "-");
+    lv_obj_align(tx_lv_lbl_model, LV_ALIGN_CENTER, 0, 0);
+  }
 
   tx_lv_cont_pick = lv_obj_create(scr);
   lv_obj_remove_style_all(tx_lv_cont_pick);
@@ -503,9 +564,22 @@ inline void tx_lvgl_ui_setup(void) {
 inline void tx_lvgl_ui_poll(void) {
   uint32_t now = millis();
 
-  if (sd_mounted && tx_lv_mode == TX_LV_ACTIVE && !tx_lv_model_dir_valid(tx_active_model_dir)) {
-    tx_active_model_clear_selection();
-    tx_lv_mode = TX_LV_PICK;
+  static TxLvUiMode tx_lv_prev_mode_sd = TX_LV_PICK;
+  static uint32_t tx_lv_last_dir_chk_ms = 0;
+  if (tx_lv_mode != tx_lv_prev_mode_sd) {
+    if (tx_lv_mode == TX_LV_ACTIVE) tx_lv_last_dir_chk_ms = 0;
+    tx_lv_prev_mode_sd = tx_lv_mode;
+  }
+
+  /* Nepreťažovať SD: plný www_models_scan_sd() každý frame môže blokovať slučku → WDT / reštarty. */
+  if (sd_mounted && tx_lv_mode == TX_LV_ACTIVE) {
+    if (tx_lv_last_dir_chk_ms == 0 || (now - tx_lv_last_dir_chk_ms) >= 2000u) {
+      tx_lv_last_dir_chk_ms = now;
+      if (!tx_lv_model_dir_valid(tx_active_model_dir)) {
+        tx_active_model_clear_selection();
+        tx_lv_mode = TX_LV_PICK;
+      }
+    }
   }
 
   int enc = tx_lvgl_take_encoder_steps();
@@ -559,19 +633,6 @@ inline void tx_lvgl_ui_poll(void) {
   if (need_refresh) {
     tx_lvgl_apply_mode_ui();
     tx_lv_last_full_ms = now;
-  }
-
-  if (tx_lv_mode == TX_LV_ACTIVE && tx_lv_lbl_sticks) {
-    static uint32_t st_tick;
-    if (now - st_tick >= 200) {
-      st_tick = now;
-      int s = 0, t = 0;
-      tx_radio_live_adc(&s, &t);
-      char b[28];
-      snprintf(b, sizeof(b), "ST %d  TH %d", s, t);
-      lv_label_set_text(tx_lv_lbl_sticks, b);
-      lv_obj_invalidate(tx_lv_lbl_sticks);
-    }
   }
 
   lv_timer_handler();

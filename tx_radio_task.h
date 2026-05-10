@@ -210,4 +210,11 @@ inline void tx_radio_begin() {
   }
 }
 
+/** MAC prijímača z model_web.json (po načítaní cfg). */
+inline bool tx_radio_cached_rx_mac(uint8_t mac[6]) {
+  if (!mac || !tx_cached_have_mac) return false;
+  memcpy(mac, tx_cached_rxmac, 6);
+  return true;
+}
+
 #endif
