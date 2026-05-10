@@ -1,0 +1,42 @@
+# Zostaví firmware (LOLIN S3 Pro) a publikuje .bin ako GitHub Release podľa commit SHA.
+# ESP očakáva asset: firmware-<40×hex>.bin v najnovšom release (GET .../releases/latest).
+name: Firmware release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build (lolin_s3_pro)
+        run: platformio run -e lolin_s3_pro
+
+      - name: Prepare OTA asset
+        run: |
+          cp ".pio/build/lolin_s3_pro/firmware.bin" "firmware-${GITHUB_SHA}.bin"
+          ls -la "firmware-${GITHUB_SHA}.bin"
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: firmware-${{ github.sha }}
+          name: Firmware ${{ github.sha }}
+          generate_release_notes: true
+          files: firmware-${{ github.sha }}.bin
+          fail_on_unmatched_files: true

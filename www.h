@@ -26,6 +26,8 @@ extern String tx_active_model_dir;
 
 AsyncWebServer www_server(80);
 
+#include "www_github_ota.h"
+
 inline void www_initEspNowLater() {
   (void)tx_espnow_begin();
 }
@@ -1498,7 +1500,21 @@ static void www_handleFirmwareGet(AsyncWebServerRequest* request) {
   www_leave_model_web_session();
   String html;
   www_page_start(html, "Firmware", "fw");
-  html += F("<div class=\"card\"><h2>Aktualizácia firmvéru</h2>");
+  html += F("<div class=\"card\"><h2>Aktualizácia z GitHubu</h2>");
+  html += F("<p class=\"breadcrumb\">Potrebné je <strong>STA WiFi</strong> s internetom (v <a class=\"site-na\" href=\"/config/wifi\">Sieť</a>). Release asset musí mať názov <span class=\"mono\">firmware-&lt;40×hex&gt;.bin</span> (z CI).</p>");
+  html += F("<p class=\"breadcrumb\">Tento build · Git <span class=\"mono\">");
+  html += String(FIRMWARE_GIT_SHA_FULL).substring(0, 7);
+  html += F("</span> · ");
+  html += GITHUB_RELEASE_OWNER;
+  html += F("/");
+  html += GITHUB_RELEASE_REPO;
+  html += F("</p>");
+  html += F("<div class=\"btnrow\" style=\"margin:.5rem 0\"><button type=\"button\" id=\"gh_chk\">Skontrolovať (online)</button>");
+  html += F("<button type=\"button\" id=\"gh_inst\" disabled>Nainštalovať z GitHubu</button></div>");
+  html += F("<p id=\"gh_msg\" class=\"breadcrumb\" style=\"min-height:1.25em\"></p>");
+  html += F("<script>(function(){var msg=document.getElementById(\"gh_msg\"),inst=document.getElementById(\"gh_inst\");function poll(){fetch(\"/config/firmware/github/status\",{credentials:\"same-origin\"}).then(function(r){return r.json();}).then(function(s){if(s&&s.busy&&s.phase===1)msg.textContent=\"Sťahujem… \"+(s.written||0)+\" / \"+(s.total||\"?\")+\" B\";}).catch(function(){});}document.getElementById(\"gh_chk\").onclick=async function(){msg.textContent=\"Kontrolujem…\";inst.disabled=true;try{var r=await fetch(\"/config/firmware/github/check\",{credentials:\"same-origin\"});var j=await r.json();if(!j.ok){msg.textContent=j.hint||(j.err||\"Chyba\")+(j.code?\" (\"+j.code+\")\":\"\");return;}msg.textContent=j.update_available?(\"Novší firmware: \"+j.remote_sha.substring(0,7)+\" (aktuálny \"+j.current_sha.substring(0,7)+\")\"):\"Si na najnovšom commite (\"+j.current_sha.substring(0,7)+\").\";inst.disabled=!j.update_available;}catch(e){msg.textContent=\"Sieť alebo odpoveď.\";}};inst.onclick=async function(){if(!confirm(\"Naozaj nahrať firmvér z GitHubu? Zariadenie sa reštartuje.\"))return;msg.textContent=\"Spúšťam OTA…\";try{var r=await fetch(\"/config/firmware/github/install\",{method:\"POST\",credentials:\"same-origin\"});var j=await r.json();if(j.ok){msg.textContent=\"Sťahujem a zapisujem flash…\";var iv=setInterval(function(){poll();},400);poll();setTimeout(function(){clearInterval(iv);},120000);}else msg.textContent=j.err||\"Chyba\";}catch(e){msg.textContent=\"Sieť.\";}};})();</script></div>");
+
+  html += F("<div class=\"card\"><h2>Nahrávanie .bin z počítača</h2>");
   html += F("<p class=\"breadcrumb\">Vyber súbor <span class=\"mono\">.bin</span> z <strong>Sketch → Export kompilovaného binárneho súboru</strong> (rovnaká doska / partície ako pri bežnom nahrávaní cez USB).</p>");
   html += F("<div class=\"card alert err\" style=\"margin-bottom:1rem\">Nesprávny súbor môže zariadenie znefunkčniť — over si model (ESP32-S3) a veľkosť flash.</div>");
   html += F("<form method=\"POST\" action=\"/config/firmware/update\" enctype=\"multipart/form-data\">");
@@ -1589,6 +1605,7 @@ inline void www_begin() {
 
   www_server.on("/config/firmware", HTTP_GET, www_handleFirmwareGet);
   www_server.on("/config/firmware/update", HTTP_POST, www_handleFirmwareDone, www_handleFirmwareChunk);
+  www_github_ota_begin();
 
   www_server.on("/config", HTTP_GET, www_handleConfigHub);
 
